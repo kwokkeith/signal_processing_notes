@@ -2,29 +2,52 @@ import numpy as np
 import matplotlib.pyplot as plt
 from numpy.fft import fft, fftfreq, fftshift
 
-def plot_raw_sar_data(raw_data: np.ndarray, sampling_frequency_hz: float, downsample_fast: int = 10, xlim_microseconds: tuple = None, title="Simulated Raw SAR Data"):
+def plot_raw_sar_data(
+    raw_data: np.ndarray,
+    sampling_frequency_hz: float,
+    downsample_fast: int = 10,
+    start_time_s: float = 0.0,
+    xlim_microseconds: tuple = None,
+    title: str = "Simulated Raw SAR Data"
+):
     """
     Plot raw SAR data (Pulse Index vs Fast Time) in dB scale.
+
+    Parameters:
+    - raw_data: 2D array [pulses × fast-time]
+    - sampling_frequency_hz: Sampling rate in Hz
+    - downsample_fast: Downsampling factor in fast-time axis
+    - start_time_s: Start time (in seconds) of the fast-time window (from min delay)
+    - xlim_microseconds: Optional x-axis limit in µs
+    - title: Plot title
     """
+    num_pulses, num_fast_time = raw_data.shape
+    if downsample_fast <= 0:
+        downsample_fast = 1
+
+    # Compute fast-time axis in microseconds
+    time_axis_us = (np.arange(0, num_fast_time, downsample_fast) / sampling_frequency_hz + start_time_s) * 1e6
+
+    # Suggest xlim based on non-zero energy
     energy = np.abs(raw_data).max(axis=0)
     nonzero_indices = np.where(energy > 0.0)[0]
 
     if len(nonzero_indices) > 0 and xlim_microseconds is None:
-        start_us = nonzero_indices[0] / sampling_frequency_hz * 1e6
-        end_us = nonzero_indices[-1] / sampling_frequency_hz * 1e6
+        start_us = (nonzero_indices[0] / sampling_frequency_hz + start_time_s) * 1e6
+        end_us = (nonzero_indices[-1] / sampling_frequency_hz + start_time_s) * 1e6
         xlim_microseconds = (start_us - 1, end_us + 1)
         print(f"Suggested xlim: ({start_us:.1f} μs, {end_us:.1f} μs)")
     elif xlim_microseconds is None:
-        xlim_microseconds = (0, raw_data.shape[1] / sampling_frequency_hz * 1e6)
+        xlim_microseconds = (time_axis_us[0], time_axis_us[-1])
 
-    if downsample_fast <= 0:
-        downsample_fast = 1
-
+    # Plot using imshow with proper extent
     plt.figure(figsize=(10, 6))
     plt.imshow(
         20 * np.log10(np.abs(raw_data[:, ::downsample_fast]) + 1e-6),
-        aspect='auto', cmap='viridis', interpolation='nearest',
-        extent=[0, raw_data.shape[1] / sampling_frequency_hz * 1e6, 0, raw_data.shape[0]]
+        aspect='auto',
+        cmap='viridis',
+        interpolation='nearest',
+        extent=[time_axis_us[0], time_axis_us[-1], 0, num_pulses]
     )
     plt.colorbar(label='Amplitude (dB)')
     plt.xlim(xlim_microseconds)

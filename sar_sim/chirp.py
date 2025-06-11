@@ -114,10 +114,12 @@ def apply_phase_alignment(
     data: np.ndarray,
     time_result_target: np.ndarray,
     time_result_ref: np.ndarray,
-    sampling_frequency: float
+    sampling_frequency: float,
+    start_time_s: float = 0.0
 ) -> np.ndarray:
     """
-    Applies range migration (phase-based) alignment to SAR data using time delay difference.
+    Applies range migration (phase-based) alignment to SAR data using time delay difference,
+    corrected by the start time of the sampled window.
 
     Parameters:
     - data: np.ndarray
@@ -128,6 +130,8 @@ def apply_phase_alignment(
         1D array of reference time delays (in seconds), same length as target.
     - sampling_frequency: float
         Sampling frequency in Hz.
+    - start_time_s: float
+        Start time of the fast-time window (in seconds).
 
     Returns:
     - np.ndarray: Phase-aligned SAR data.
@@ -136,8 +140,11 @@ def apply_phase_alignment(
     if len(time_result_target) != num_azimuth or len(time_result_ref) != num_azimuth:
         raise ValueError("Time delay arrays must match number of azimuth lines.")
 
+    # Frequency axis
     freqs = np.fft.fftfreq(num_fast_time, d=1 / sampling_frequency).astype(np.float32)
-    delta_t = time_result_target - 2 * time_result_ref  # shape: (num_azimuth,)
+    
+    # Align delays to fast-time window
+    delta_t = time_result_target - 2 * time_result_ref + start_time_s  # corrected difference
 
     # FFT along fast-time axis
     data_fft = np.fft.fft(data, axis=1)
@@ -150,6 +157,40 @@ def apply_phase_alignment(
     # IFFT back to time domain
     aligned_data = np.fft.ifft(data_fft, axis=1)
     return aligned_data
+
+
+
+def apply_sample_shift_alignment(
+    data: np.ndarray,
+    time_result_target: np.ndarray,
+    time_result_ref: np.ndarray,
+    sampling_frequency: float
+) -> np.ndarray:
+    """
+    Applies sample-shift-based range migration.
+
+    Parameters:
+    - data: np.ndarray [azimuth × fast time]
+    - time_result_target: np.ndarray (s)
+    - time_result_ref: np.ndarray (s)
+    - sampling_frequency: float (Hz)
+
+    Returns:
+    - np.ndarray: Shifted SAR data
+    """
+    num_azimuth = data.shape[0]
+    if len(time_result_target) != num_azimuth or len(time_result_ref) != num_azimuth:
+        raise ValueError("Time delay arrays must match number of azimuth lines.")
+
+    delta_samples = np.round((time_result_target - 2 * time_result_ref) * sampling_frequency).astype(int)
+    aligned = np.zeros_like(data, dtype=data.dtype)
+
+    for i in range(num_azimuth):
+        aligned[i] = np.roll(data[i], -delta_samples[i])  # left shift = earlier arrival
+
+    return aligned
+
+
 
 
 def generate_baseband_chirp_time_domain(

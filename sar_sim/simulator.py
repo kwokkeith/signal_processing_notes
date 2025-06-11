@@ -1,48 +1,59 @@
 import numpy as np
-from sar_sim.chirp import apply_time_delay_frequency_domain, generate_chirp_time_domain, iq_demodulate_chirp, apply_phase_alignment, generate_baseband_chirp_time_domain
+from sar_sim.chirp import apply_time_delay_frequency_domain, generate_chirp_time_domain, iq_demodulate_chirp, apply_phase_alignment, generate_baseband_chirp_time_domain, apply_sample_shift_alignment
 from sar_sim.matched_filter import matched_filter_frequency_domain
 from sar_sim.geometry import compute_target_time_delays, SensorParameters
 
-def simulate_raw_data(sensor: SensorParameters, target_pos: tuple):
-    """
-    Simulates SAR raw data for a point target.
 
-    Parameters:
-    - sensor: SensorParameters instance
-    - target_pos: (x, y, z) position in metres
-    - num_pulses: number of chirp transmissions (PRF * integration time)
+def simulate_raw_data(sensor: SensorParameters, target_pos: tuple) -> np.ndarray:
+    """
+    Simulates SAR raw data for a point target using:
+    - Sub-sample delay via frequency-domain phase shift
+    - Delay buffer to position chirps properly in fast-time
 
     Returns:
-    - np.ndarray: [num_pulses × num_samples] complex SAR raw data
+    - np.ndarray: 2D complex array [azimuth × fast-time]
     """
-    # Generate base chirp
+    fs = sensor.sampling_frequency_hz
     chirp = generate_chirp_time_domain(
-        sampling_frequency_mhz=sensor.sampling_frequency_hz / 1e6,
+        sampling_frequency_mhz=fs / 1e6,
         carrier_frequency_mhz=sensor.carrier_frequency_hz / 1e6,
         bandwidth_mhz=sensor.bandwidth_hz / 1e6,
         pulse_width_us=sensor.pulse_width_s * 1e6
     )
+    chirp_len = len(chirp)
 
-    # Compute time delays for each pulse
-    time_result = compute_target_time_delays(sensor, target_pos)
+    # Compute time delays (in seconds) and delay in samples
+    time_result = compute_target_time_delays(sensor, target_pos)  # shape: (num_pulses,)
+    delay_samples = (time_result * fs)
 
-    # Simulate raw data by delaying and demodulating chirp
-    raw_data = np.zeros((len(time_result), len(chirp)), dtype=np.complex64)
+    # Allocate output buffer with delay margin
+    min_delay = int(np.floor(delay_samples.min()))
+    max_delay = int(np.ceil(delay_samples.max())) + chirp_len
+    fast_time_span = max_delay - min_delay
+    num_pulses = len(time_result)
 
-    for i, delay in enumerate(time_result):
-        delayed_chirp = apply_time_delay_frequency_domain(
-            chirp=chirp,
-            time_delay_us=delay * 1e6,  # Convert s to µs
-            sampling_frequency_mhz=sensor.sampling_frequency_hz / 1e6
-        )
-        baseband = iq_demodulate_chirp(
-            delayed_chirp,
-            carrier_frequency_mhz=sensor.carrier_frequency_hz / 1e6,
-            sampling_frequency_mhz=sensor.sampling_frequency_hz / 1e6
-        )
-        raw_data[i, :] = baseband
+    raw_data = np.zeros((num_pulses, fast_time_span), dtype=np.complex64)
 
-    return raw_data
+    # Precompute FFT of demodulated chirp
+    baseband_chirp = iq_demodulate_chirp(
+        chirp,
+        carrier_frequency_mhz=sensor.carrier_frequency_hz / 1e6,
+        sampling_frequency_mhz=fs / 1e6
+    )
+    chirp_fft = np.fft.fft(baseband_chirp)
+    freqs = np.fft.fftfreq(chirp_len, d=1 / fs)
+
+    # Simulate raw data per pulse
+    for i, delay in enumerate(delay_samples):
+        fractional_delay = delay - np.floor(delay)
+        phase_shift = np.exp(-1j * 2 * np.pi * freqs * fractional_delay)
+        shifted_chirp = np.fft.ifft(chirp_fft * phase_shift).astype(np.complex64)
+
+        # Place chirp in correct fast-time slot
+        shift = int(np.floor(delay)) - min_delay
+        raw_data[i, shift:shift + chirp_len] = shifted_chirp
+
+    return raw_data, time_result, min_delay / fs  # include timing info if needed
 
 
 def simulate_range_compression(
@@ -79,6 +90,7 @@ def perform_range_migration(
     compressed_data: np.ndarray,
     sensor: SensorParameters,
     target_position: tuple,
+    reference_signal_frequency_hz: float,
     sampling_frequency: float
 ) -> np.ndarray:
     """
@@ -105,7 +117,8 @@ def perform_range_migration(
         data=compressed_data,
         time_result_target=time_result_target,
         time_result_ref=time_result_ref,
-        sampling_frequency=sampling_frequency
+        sampling_frequency=sampling_frequency,
+        start_time_s= time_result_target.min()
     )
     return aligned_data
 
