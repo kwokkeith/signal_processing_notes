@@ -2,46 +2,49 @@ import numpy as np
 import warnings
 
 from scipy import signal
+from scipy.signal import butter, filtfilt
 
 
 
 def generate_chirp_time_domain(
-    sampling_frequency_mhz: float = 360*2.5,
-    carrier_frequency_mhz: float = 360,
-    bandwidth_mhz: float = 100,
-    pulse_width_us: float = 10,
+    delay_s: float,
+    sampling_frequency_hz: float,
+    carrier_frequency_hz: float,
+    bandwidth_hz: float,
+    pulse_width_s: float,
     dtype=np.complex64
 ) -> np.ndarray:
-    """"
-    Generates a baseband complex chirp signal for SAR in the time domain.
+    """
+    Generates a time-delayed chirp signal for SAR in the time domain.
 
     Parameters:
-    - sampling_frequency_mhz: float, in MHz
-    - carrier_frequency_mhz: float, in MHz
-    - bandwidth_mhz: float, in MHz
-    - pulse_width_us: float, in microseconds
-    - dtype: np.dtype, optional (default: complex64)
+    - delay_s: float, delay to apply (in seconds)
+    - sampling_frequency_hz: float, sampling frequency in Hz
+    - carrier_frequency_hz: float, carrier frequency in Hz
+    - bandwidth_hz: float, chirp bandwidth in Hz
+    - pulse_width_s: float, chirp duration in seconds
+    - dtype: output data type
 
     Returns:
-    - np.ndarray: complex chirp signal in time domain
+    - np.ndarray: complex time-delayed chirp
     """
-    # Check if sampling frequency meets Nyquist criterion (2.0 times for theoretical Nyquist, 2.5 times for practical applications)
-    if sampling_frequency_mhz < 2.5 * (carrier_frequency_mhz + bandwidth_mhz/2):
-        warnings.warn("Sampling frequency is not 2.5 times the maximum frequency of the chirp (below Nyquist Sampling Rate).")
-
-    fs = sampling_frequency_mhz * 1e6  # Hz
-    fc = carrier_frequency_mhz * 1e6   # Hz
-    bw = bandwidth_mhz * 1e6           # Hz
-    Tp = pulse_width_us * 1e-6         # s
+    fs = sampling_frequency_hz
+    fc = carrier_frequency_hz
+    bw = bandwidth_hz
+    Tp = pulse_width_s
+    k = bw / Tp
 
     num_samples = int(np.floor(fs * Tp))
-    t = np.linspace(-Tp / 2, Tp / 2, num_samples, endpoint=False)
-    k = bw / Tp  # chirp rate in Hz/s
 
-    phase = 2 * np.pi * (fc * t + 0.5 * k * t**2)
+    # Chirp physically exists between delay_s and delay_s + Tp
+    t = np.linspace(delay_s, delay_s + Tp, num_samples, endpoint=False)
+
+    # Phase of LFM chirp centred at Tp/2 after delay
+    phase = 2 * np.pi * (fc * t + 0.5 * k * (t - (delay_s + Tp/2))**2)
     chirp = np.exp(1j * phase).astype(dtype)
 
     return chirp
+
 
 
 def apply_time_delay_frequency_domain(
@@ -74,40 +77,53 @@ def apply_time_delay_frequency_domain(
     return np.fft.ifft(shifted_fft).astype(dtype)
 
 
+
 def iq_demodulate_chirp(
     chirp: np.ndarray,
     carrier_frequency_mhz: float = 360,
-    sampling_frequency_mhz: float = 360*2.5,
+    sampling_frequency_mhz: float = 360 * 2.5,
     dtype=np.complex64
 ) -> np.ndarray:
     """
-    Performs IQ demodulation on a passband chirp signal.
+    Simulates analog IQ demodulation of a passband chirp signal using:
+    - In-phase and quadrature mixing
+    - Low-pass filtering to extract baseband signal
 
     Parameters:
     - chirp: np.ndarray
-        Real or complex passband chirp signal (in time domain).
+        Real-valued passband chirp signal
     - carrier_frequency_mhz: float
-        Carrier frequency in MHz.
+        Carrier frequency in MHz
     - sampling_frequency_mhz: float
-        Sampling frequency in MHz.
-    - dtype: np.dtype, optional
-        Output data type, default np.complex64
+        Sampling frequency in MHz
+    - dtype: np.dtype
+        Output data type (default: np.complex64)
 
     Returns:
-    - np.ndarray: Demodulated baseband chirp (complex)
+    - np.ndarray: Baseband complex IQ signal (I + jQ)
     """
     fc = carrier_frequency_mhz * 1e6
     fs = sampling_frequency_mhz * 1e6
     n = chirp.shape[0]
+    t = np.arange(n) / fs
 
-    t = np.arange(n, dtype=np.float32) / fs
-    demodulator = np.exp(-1j * 2 * np.pi * fc * t).astype(dtype)
+    # Mix to baseband (I and Q separately)
+    i_mixed = chirp * np.cos(2 * np.pi * fc * t)
+    q_mixed = chirp * -np.sin(2 * np.pi * fc * t)
 
-    # If chirp is real, ensure it's cast to complex
-    chirp_complex = chirp.astype(dtype, copy=False)
-    
-    baseband = chirp_complex * demodulator
+    # Design low-pass filter (cutoff = 1.2 * chirp bandwidth, conservatively < fs/2)
+    nyq = fs / 2
+    cutoff_hz = min(fc / 2, nyq * 0.8)
+    b, a = butter(N=5, Wn=cutoff_hz / nyq, btype='low')
+
+    # Apply LPF (simulate analog filtering)
+    i_baseband = filtfilt(b, a, i_mixed)
+    q_baseband = filtfilt(b, a, q_mixed)
+
+    # Combine to form complex baseband signal
+    baseband = (i_baseband + 1j * q_baseband).astype(dtype)
     return baseband
+
 
 
 def apply_phase_alignment(
@@ -115,7 +131,7 @@ def apply_phase_alignment(
     time_result_target: np.ndarray,
     time_result_ref: np.ndarray,
     sampling_frequency: float,
-    start_time_s: float = 0.0
+    chirp_start_time: float = 0.0,
 ) -> np.ndarray:
     """
     Applies range migration (phase-based) alignment to SAR data using time delay difference,
@@ -130,9 +146,9 @@ def apply_phase_alignment(
         1D array of reference time delays (in seconds), same length as target.
     - sampling_frequency: float
         Sampling frequency in Hz.
-    - start_time_s: float
-        Start time of the fast-time window (in seconds).
-
+    - chirp_start_time: float, optional
+        Start time of the chirp window (in seconds), default is 0.0.
+        
     Returns:
     - np.ndarray: Phase-aligned SAR data.
     """
@@ -144,7 +160,7 @@ def apply_phase_alignment(
     freqs = np.fft.fftfreq(num_fast_time, d=1 / sampling_frequency).astype(np.float32)
     
     # Align delays to fast-time window
-    delta_t = time_result_target - 2 * time_result_ref + start_time_s  # corrected difference
+    delta_t = time_result_ref - time_result_target # corrected difference
 
     # FFT along fast-time axis
     data_fft = np.fft.fft(data, axis=1)

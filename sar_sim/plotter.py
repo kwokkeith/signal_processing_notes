@@ -43,12 +43,22 @@ def plot_raw_sar_data(
     # Plot using imshow with proper extent
     plt.figure(figsize=(10, 6))
     plt.imshow(
-        20 * np.log10(np.abs(raw_data[:, ::downsample_fast]) + 1e-6),
+        # 20 * np.log10(np.abs(raw_data[:, ::downsample_fast]) + 1e-6),
+        np.abs(raw_data[:, ::downsample_fast]),
         aspect='auto',
         cmap='viridis',
         interpolation='nearest',
         extent=[time_axis_us[0], time_axis_us[-1], 0, num_pulses]
     )
+    # plt.imshow(
+    #     np.abs(raw_data[:, ::downsample_fast]),
+    #     aspect='auto',
+    #     cmap='viridis',
+    #     interpolation='nearest',
+    #     extent=[time_axis_us[0], time_axis_us[-1], 0, num_pulses]
+    # )
+        
+
     plt.colorbar(label='Amplitude (dB)')
     plt.xlim(xlim_microseconds)
     plt.xlabel('Fast Time (µs)')
